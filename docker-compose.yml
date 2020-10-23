@@ -1,0 +1,17 @@
+version: "3.8"
+services:
+  ui:
+    build: ./UI
+    stdin_open: true
+    ports:
+      - "3000:3000"
+  stt:
+    build: ./STT
+    stdin_open: true
+    ports:
+      - "4000:4000"
+  nlu:
+    build: ./NLU
+    stdin_open: true
+    ports:
+      - "5005:5005"

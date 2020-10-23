@@ -1,0 +1,23 @@
+{
+  "name": "StreamingIntentSTT",
+  "version": "0.1.0",
+  "private": true,
+  "dependencies": {
+    "deepspeech": "^0.8.0",
+    "node-vad": "^1.1.4",
+    "socket.io": "^2.3.0",
+    "socket.io-client": "^2.3.0"
+  },
+  "browserslist": {
+    "production": [
+      ">0.2%",
+      "not dead",
+      "not op_mini all"
+    ],
+    "development": [
+      "last 1 chrome version",
+      "last 1 firefox version",
+      "last 1 safari version"
+    ]
+  }
+}
