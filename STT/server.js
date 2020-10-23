@@ -2,12 +2,15 @@ const http = require('http');
 const socketIO = require('socket.io');
 const DeepSpeech = require('deepspeech');
 const VAD = require('node-vad');
+const fetch = require('node-fetch');
 
 let DEEPSPEECH_MODEL = __dirname + '/models/deepspeech-0.8.2-models'; // path to deepspeech english model directory
 
 let SILENCE_THRESHOLD = 200; // how many milliseconds of inactivity before processing the audio
 
 const SERVER_PORT = 4000; // websocket server port
+
+const NLU_SERVER = 'http://nlu:5005'
 
 // const VAD_MODE = VAD.Mode.NORMAL;
 // const VAD_MODE = VAD.Mode.LOW_BITRATE;
@@ -66,7 +69,7 @@ function endAudioStream(callback) {
 	let results = intermediateDecode();
 	if (results) {
 		if (callback) {
-			callback(results);
+			add_nlu_intents(results).then(callback).catch((err) => {console.log(err);});
 		}
 	}
 }
@@ -96,7 +99,7 @@ function processSilence(data, callback) {
 				let results = intermediateDecode();
 				if (results) {
 					if (callback) {
-						callback(results);
+						add_nlu_intents(results).then(callback).catch((err) => {console.log(err);});
 					}
 				}
 			}
@@ -107,6 +110,18 @@ function processSilence(data, callback) {
 		bufferSilence(data);
 	}
 }
+
+async function add_nlu_intents(results) {
+	const nlu_body = { text: results.text };
+
+	const nlu_response = await fetch(NLU_SERVER+'/model/parse', {
+		method: 'post', body: JSON.stringify(nlu_body),
+		headers: {'Content-Type': 'application/json'}
+	});
+
+	results.nlu = await nlu_response.json();
+	return results;
+};
 
 function bufferSilence(data) {
 	// VAD has a tendency to cut the first bit of audio data from the start of a recording

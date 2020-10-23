@@ -1,8 +1,6 @@
 import React, {Component} from 'react';
 import io from 'socket.io-client';
 
-const fetch = require('node-fetch');
-
 const DOWNSAMPLING_WORKER = './downsampling_worker.js';
 
 const STT_HOST = 'http://localhost:4000';
@@ -39,17 +37,7 @@ class App extends Component {
 			console.log('recognized:', results);
 			const {recognitionOutput} = this.state;
 			results.id = recognitionCount++;
-
-			const nlu_body = { text: results.text };
-
-			const nlu_response = await fetch('http://localhost:5005/model/parse', {
-				method: 'post', body: JSON.stringify(nlu_body),
-				headers: {'Content-Type': 'application/json'}
-			});
-
-			results.nlu = await nlu_response.json();
-
-			console.log('processed:', results);
+			//console.log('processed:', results);
 			recognitionOutput.unshift(results);
 			this.setState({recognitionOutput});
 		});
@@ -85,7 +73,7 @@ class App extends Component {
 					{r.text}
 					<ul>
 						{r.nlu.intent_ranking.slice(0,3).map( (intent) => {
-							return (<li> {intent.name}: {intent.confidence} </li> );
+							return (<li key={intent.id}> {intent.name}: {intent.confidence} </li> );
 						})}
 					</ul>
 					</li>);
