@@ -5,13 +5,16 @@ services:
     stdin_open: true
     ports:
       - "3000:3000"
+    stop_signal: SIGKILL
   stt:
     build: ./STT
     stdin_open: true
     ports:
       - "4000:4000"
+    stop_signal: SIGKILL
   nlu:
     build: ./NLU
     stdin_open: true
     ports:
       - "5005:5005"
+    stop_signal: SIGKILL
