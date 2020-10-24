@@ -4,7 +4,6 @@
   "private": true,
   "dependencies": {
     "defaults": "^1.0.3",
-    "node-vad": "^1.1.4",
     "react": "^16.12.0",
     "react-dom": "^16.12.0",
     "react-scripts": "^3.4.0",

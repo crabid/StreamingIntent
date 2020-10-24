@@ -1,7 +1,6 @@
 const http = require('http');
 const socketIO = require('socket.io');
 const DeepSpeech = require('deepspeech');
-const VAD = require('node-vad');
 const fetch = require('node-fetch');
 
 let DEEPSPEECH_MODEL = __dirname + '/models/deepspeech-0.8.2-models'; // path to deepspeech english model directory
@@ -10,13 +9,12 @@ let SILENCE_THRESHOLD = 200; // how many milliseconds of inactivity before proce
 
 const SERVER_PORT = 4000; // websocket server port
 
-const NLU_SERVER = 'http://nlu:5005'
+const NLU_SERVER = 'http://nlu:5005'; // Location of the NLU server
 
-// const VAD_MODE = VAD.Mode.NORMAL;
-// const VAD_MODE = VAD.Mode.LOW_BITRATE;
-// const VAD_MODE = VAD.Mode.AGGRESSIVE;
-const VAD_MODE = VAD.Mode.VERY_AGGRESSIVE;
-const vad = new VAD(VAD_MODE);
+const INTENT_THRESHOLD = .9; // Threshold for intent classification
+
+const TRANSCRIPT_INTERVAL = 100; // Time between intermediateDecode's in ms
+
 
 function createModel(modelDir) {
 	let modelPath = modelDir + '.pbmm';
@@ -29,44 +27,35 @@ function createModel(modelDir) {
 let englishModel = createModel(DEEPSPEECH_MODEL);
 
 let modelStream;
-let recordedChunks = 0;
-let silenceStart = null;
 let recordedAudioLength = 0;
 let endTimeout = null;
 let silenceBuffers = [];
 
-function processAudioStream(data, callback) {
-	vad.processAudio(data, 16000).then((res) => {
-		switch (res) {
-			case VAD.Event.ERROR:
-				console.log("VAD ERROR");
-				break;
-			case VAD.Event.NOISE:
-				console.log("VAD NOISE");
-				break;
-			case VAD.Event.SILENCE:
-				processSilence(data, callback);
-				break;
-			case VAD.Event.VOICE:
-				processVoice(data);
-				break;
-			default:
-				console.log('default', res);
+let currentTranscript = '';
+let silenceTimeout = null;
+let silenceTimeoutTolerence = 1000; // How long to wait before starting new sentence (in ms)
 
-		}
-	});
+/////
+// Stream handling functions
+/////
+
+function processAudioStream(data) {
+	// Process a chunck of audio data
+	feedAudioContent(data);
 
 	// timeout after 1s of inactivity
 	clearTimeout(endTimeout);
 	endTimeout = setTimeout(function() {
 		console.log('timeout');
-		resetAudioStream();
+		resetStream();
 	},1000);
 }
 
 function endAudioStream(callback) {
 	console.log('[end]');
-	let results = intermediateDecode();
+
+	// Transmit final decoding
+	let results = resetStream();
 	if (results) {
 		if (callback) {
 			add_nlu_intents(results).then(callback).catch((err) => {console.log(err);});
@@ -74,43 +63,66 @@ function endAudioStream(callback) {
 	}
 }
 
-function resetAudioStream() {
-	clearTimeout(endTimeout);
+function resetAudioStream(callback) {
 	console.log('[reset]');
-	intermediateDecode(); // ignore results
-	recordedChunks = 0;
-	silenceStart = null;
-}
 
-function processSilence(data, callback) {
-	if (recordedChunks > 0) { // recording is on
-		process.stdout.write('-'); // silence detected while recording
-
-		feedAudioContent(data);
-
-		if (silenceStart === null) {
-			silenceStart = new Date().getTime();
+	// Transmit final decoding
+	let results = resetStream();
+	if (results) {
+		if (callback) {
+			add_nlu_intents(results).then(callback).catch((err) => {console.log(err);});
 		}
-		else {
-			let now = new Date().getTime();
-			if (now - silenceStart > SILENCE_THRESHOLD) {
-				silenceStart = null;
-				console.log('[end]');
-				let results = intermediateDecode();
-				if (results) {
-					if (callback) {
-						add_nlu_intents(results).then(callback).catch((err) => {console.log(err);});
-					}
-				}
-			}
-		}
-	}
-	else {
-		process.stdout.write('.'); // silence detected while not recording
-		bufferSilence(data);
 	}
 }
 
+// Generate function that updates the transcript
+function processTranscriptCallback(transcript_callback, intent_callback, silence_callback) {
+	return function (){
+		let newTranscript = intermediateDecode();
+		//console.log(JSON.stringify(newTranscript));
+		if (newTranscript != currentTranscript) {
+			//console.log("Transcript change:",newTranscript,currentTranscript);
+			currentTranscript = newTranscript;
+			transcript_callback(currentTranscript);
+			intents_handler({text:currentTranscript},intent_callback);
+
+			// Set silence timeout in case transcript doesn't change
+			clearTimeout(silenceTimeout);
+			silenceTimeout = setTimeout(function() {
+				console.log('silenceTimeout');
+				resetAudioStream(silence_callback);
+			},silenceTimeoutTolerence);
+		}
+	}
+}
+
+// Takes a transcript and a callback. If the transcript has an identifiable intent (above threshold), trigger callback
+async function intents_handler(results, intent_callback) {
+	// const results = await add_nlu_intents(transcript);
+	const nlu_body = { text: results.text };
+
+	const nlu_response = await fetch(NLU_SERVER+'/model/parse', {
+		method: 'post', body: JSON.stringify(nlu_body),
+		headers: {'Content-Type': 'application/json'}
+	});
+
+	results.nlu = await nlu_response.json();
+
+	//console.log(JSON.stringify(results));
+
+	console.log(results.nlu.intent.name +': '+ results.nlu.intent.confidence);
+
+	// If the transcript so far has a clear intent, transmit it
+	if (results.nlu.intent.confidence > INTENT_THRESHOLD) {
+		intent_callback(results);
+		console.log("Found intent: " + results.nlu.intent.name);
+		console.log("Utterance:", results.text)
+		//console.log("Current transcript:",currentTranscript);
+		resetStream();
+	}
+};
+
+// Get an intent evaluation from the NLU server
 async function add_nlu_intents(results) {
 	const nlu_body = { text: results.text };
 
@@ -123,49 +135,14 @@ async function add_nlu_intents(results) {
 	return results;
 };
 
-function bufferSilence(data) {
-	// VAD has a tendency to cut the first bit of audio data from the start of a recording
-	// so keep a buffer of that first bit of audio and in addBufferedSilence() reattach it to the beginning of the recording
-	silenceBuffers.push(data);
-	if (silenceBuffers.length >= 3) {
-		silenceBuffers.shift();
-	}
-}
-
-function addBufferedSilence(data) {
-	let audioBuffer;
-	if (silenceBuffers.length) {
-		silenceBuffers.push(data);
-		let length = 0;
-		silenceBuffers.forEach(function (buf) {
-			length += buf.length;
-		});
-		audioBuffer = Buffer.concat(silenceBuffers, length);
-		silenceBuffers = [];
-	}
-	else audioBuffer = data;
-	return audioBuffer;
-}
-
-function processVoice(data) {
-	silenceStart = null;
-	if (recordedChunks === 0) {
-		console.log('');
-		process.stdout.write('[start]'); // recording started
-	}
-	else {
-		process.stdout.write('='); // still recording
-	}
-	recordedChunks++;
-
-	data = addBufferedSilence(data);
-	feedAudioContent(data);
-}
+/////
+//Functions to handle the model interface
+/////
 
 function createStream() {
 	modelStream = englishModel.createStream();
-	recordedChunks = 0;
 	recordedAudioLength = 0;
+	currentTranscript='';
 }
 
 function finishStream() {
@@ -173,8 +150,8 @@ function finishStream() {
 		let start = new Date();
 		let text = modelStream.finishStream();
 		if (text) {
-			console.log('');
-			console.log('Recognized Text:', text);
+			//console.log('');
+			//console.log('Recognized Text:', text);
 			let recogTime = new Date().getTime() - start.getTime();
 			return {
 				text,
@@ -188,6 +165,13 @@ function finishStream() {
 }
 
 function intermediateDecode() {
+	return modelStream.intermediateDecode();
+}
+
+// Stream should always stay created as long as client is connected. Use this to reset
+function resetStream() {
+	clearTimeout(endTimeout);
+	clearTimeout(silenceTimeout);
 	let results = finishStream();
 	createStream();
 	return results;
@@ -197,6 +181,11 @@ function feedAudioContent(chunk) {
 	recordedAudioLength += (chunk.length / 2) * (1 / 16000) * 1000;
 	modelStream.feedAudioContent(chunk);
 }
+
+
+/////
+// HTTP server
+/////
 
 const app = http.createServer(function (req, res) {
 	res.writeHead(200);
@@ -210,26 +199,36 @@ io.set('origins', '*:*');
 io.on('connection', function(socket) {
 	console.log('client connected');
 
-	socket.once('disconnect', () => {
-		console.log('client disconnected');
-	});
+	//intents_handler({text:"I'm great!"},(results) =>{});
 
 	createStream();
 
+	let transcript_checks = setInterval(processTranscriptCallback(
+			(transcript) => {socket.emit('transcription_step', transcript); }, // Transcript callback
+			(results) => {socket.emit('recognize_intent',results);}, // Intent callback
+			(results) => {socket.emit('final_intent',results);} // Silence callback
+		),TRANSCRIPT_INTERVAL);
+
+	socket.once('disconnect', () => {
+		console.log('client disconnected');
+		clearInterval(transcript_checks);
+		finishStream(); // Close the stream
+	});
+
 	socket.on('stream-data', function(data) {
-		processAudioStream(data, (results) => {
-			socket.emit('recognize', results);
-		});
+		processAudioStream(data);
 	});
 
 	socket.on('stream-end', function() {
-		endAudioStream((results) => {
-			socket.emit('recognize', results);
+		endAudioStream( (results) => {
+			socket.emit('final_intent', results);
 		});
 	});
 
 	socket.on('stream-reset', function() {
-		resetAudioStream();
+		resetAudioStream( (results) => {
+			socket.emit('final_intent', results);
+		});
 	});
 });
 

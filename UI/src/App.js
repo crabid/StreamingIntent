@@ -1,3 +1,10 @@
+// Based on https://github.com/mozilla/DeepSpeech-examples/tree/r0.8/web_microphone_websocket
+//
+// The UI streams microphone data to the STT server. This server streams the ongoing transcription back. When it detects an intent, it triggers an event which the UI logs.
+// The UI presents the current transcription at the top and then a list of intents and associated text snippets.
+//
+
+
 import React, {Component} from 'react';
 import io from 'socket.io-client';
 
@@ -13,7 +20,8 @@ class App extends Component {
 			recording: false,
 			recordingStart: 0,
 			recordingTime: 0,
-			recognitionOutput: []
+			recognitionOutput: [],
+			transcript: ''
 		};
 	}
 
@@ -33,15 +41,26 @@ class App extends Component {
 			this.stopRecording();
 		});
 
-		this.socket.on('recognize', async (results) => {
-			console.log('recognized:', results);
+		this.socket.on('recognize_intent', (results) => {
 			const {recognitionOutput} = this.state;
 			results.id = recognitionCount++;
-			//console.log('processed:', results);
 			recognitionOutput.unshift(results);
 			this.setState({recognitionOutput});
+			console.log('recognized:', results);
 		});
-	}
+
+		this.socket.on('final_intent', (results) => {
+			const {recognitionOutput} = this.state;
+			results.id = recognitionCount++;
+			recognitionOutput.unshift(results);
+			this.setState({recognitionOutput});
+			console.log('final recognition:', results);
+		});
+
+		this.socket.on('transcription_step', (results) => {
+			this.setState({transcript: results});
+		});
+}
 
 	render() {
 		return (<div className="App">
@@ -56,6 +75,7 @@ class App extends Component {
 
 				{this.renderTime()}
 			</div>
+			{this.state.transcript}
 			{this.renderRecognitionOutput()}
 		</div>);
 	}
