@@ -28,7 +28,7 @@ function process(inputFrame) {
     }
 
     const PV_SAMPLE_RATE = 16000;
-    const PV_FRAME_LENGTH = 512;
+    const PV_FRAME_LENGTH = 1024; //Works: 1024; default: 512; Note: The input frame size is fixed
 
     while ((inputBuffer.length * PV_SAMPLE_RATE / inputSampleRate) > PV_FRAME_LENGTH) {
         let outputFrame = new Int16Array(PV_FRAME_LENGTH);
