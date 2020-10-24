@@ -13,7 +13,7 @@ const NLU_SERVER = 'http://nlu:5005'; // Location of the NLU server
 
 const INTENT_THRESHOLD = .9; // Threshold for intent classification
 
-const TRANSCRIPT_INTERVAL = 100; // Time between intermediateDecode's in ms
+const TRANSCRIPT_INTERVAL = 200; // Time between intermediateDecode's in ms
 
 
 function createModel(modelDir) {
@@ -33,8 +33,10 @@ let silenceBuffers = [];
 
 let currentTranscript = '';
 let silenceTimeout = null;
-let silenceTimeoutTolerence = 1000; // How long to wait before starting new sentence (in ms)
+const silenceTimeoutTolerence = 1000; // How long to wait before starting new sentence (in ms)
 
+let numberOfBuffers = 0;
+let numberOfSame = 0;
 /////
 // Stream handling functions
 /////
@@ -79,9 +81,12 @@ function resetAudioStream(callback) {
 function processTranscriptCallback(transcript_callback, intent_callback, silence_callback) {
 	return function (){
 		let newTranscript = intermediateDecode();
-		//console.log(JSON.stringify(newTranscript));
+		//console.log(numberOfBuffers);
+		numberOfBuffers=0;
 		if (newTranscript != currentTranscript) {
 			//console.log("Transcript change:",newTranscript,currentTranscript);
+			//console.log("Same:",numberOfSame);
+			numberOfSame=0;
 			currentTranscript = newTranscript;
 			transcript_callback(currentTranscript);
 			intents_handler({text:currentTranscript},intent_callback);
@@ -92,7 +97,7 @@ function processTranscriptCallback(transcript_callback, intent_callback, silence
 				console.log('silenceTimeout');
 				resetAudioStream(silence_callback);
 			},silenceTimeoutTolerence);
-		}
+		} else {if (newTranscript != '') {numberOfSame++;} }
 	}
 }
 
@@ -180,6 +185,7 @@ function resetStream() {
 function feedAudioContent(chunk) {
 	recordedAudioLength += (chunk.length / 2) * (1 / 16000) * 1000;
 	modelStream.feedAudioContent(chunk);
+	numberOfBuffers++;
 }
 
 
@@ -216,6 +222,7 @@ io.on('connection', function(socket) {
 	});
 
 	socket.on('stream-data', function(data) {
+		//console.log('tick');
 		processAudioStream(data);
 	});
 
