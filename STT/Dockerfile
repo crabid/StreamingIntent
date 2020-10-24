@@ -7,6 +7,6 @@ RUN wget -nv -i ./model_list
 WORKDIR /app
 COPY package.json /app
 RUN yarn install
-COPY server.js /app
+COPY . /app
 CMD node server.js
 EXPOSE 4000

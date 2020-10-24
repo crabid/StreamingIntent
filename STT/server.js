@@ -1,134 +1,58 @@
+// Server for doing STT
+// Accepts 'stream-{data,end,reset}' messages on socket.io
+// Sends 'transcription_step', 'recognize_intent' or 'final_intent' messages
+// 'transcription_step' payload: string with transcript
+// 'recognize_intent' payload: object with text: transcript and nlu: the result of rasa/model/parse
+// 			-- This response indicates that an intermediate decode found a high certainty intent
+// 'final_intent' payload: object with text: transcript and nlu: the result of rasa/model/parse
+// 			-- This response indicates that the stream was ended for some reason and this is the intents found with the final transcript
+
 const http = require('http');
 const socketIO = require('socket.io');
-const DeepSpeech = require('deepspeech');
 const fetch = require('node-fetch');
+const {Worker} = require('worker_threads');
 
-let DEEPSPEECH_MODEL = __dirname + '/models/deepspeech-0.8.2-models'; // path to deepspeech english model directory
-
-let SILENCE_THRESHOLD = 200; // how many milliseconds of inactivity before processing the audio
-
+const STT_WORKER = './stt_worker.js';
 const SERVER_PORT = 4000; // websocket server port
-
 const NLU_SERVER = 'http://nlu:5005'; // Location of the NLU server
-
 const INTENT_THRESHOLD = .9; // Threshold for intent classification
-
-const TRANSCRIPT_INTERVAL = 200; // Time between intermediateDecode's in ms
-
-
-function createModel(modelDir) {
-	let modelPath = modelDir + '.pbmm';
-	let scorerPath = modelDir + '.scorer';
-	let model = new DeepSpeech.Model(modelPath);
-	model.enableExternalScorer(scorerPath);
-	return model;
-}
-
-let englishModel = createModel(DEEPSPEECH_MODEL);
-
-let modelStream;
-let recordedAudioLength = 0;
+const INACTIVITY_TIMEOUT = 1000;
+const SILENCE_TIMEOUT = 1000;
 let endTimeout = null;
-let silenceBuffers = [];
-
-let currentTranscript = '';
 let silenceTimeout = null;
-const silenceTimeoutTolerence = 1000; // How long to wait before starting new sentence (in ms)
 
-let numberOfBuffers = 0;
-let numberOfSame = 0;
-/////
-// Stream handling functions
-/////
 
-function processAudioStream(data) {
-	// Process a chunck of audio data
-	feedAudioContent(data);
+function processTranscript (results, transcriptCallback, intentCallback, silenceCallback) {
+	transcriptCallback(results.text);
 
-	// timeout after 1s of inactivity
-	clearTimeout(endTimeout);
-	endTimeout = setTimeout(function() {
-		console.log('timeout');
-		resetStream();
-	},1000);
+	// This is leading to multiple triggers since it doesn't dump the stream before a new trasncript comes in
+	addNLUIntents(results).then(intentsFilter(intentCallback)).catch( (err) => console.log(err) );
+
+	// Set silence timeout in case transcript doesn't change
+	clearTimeout(silenceTimeout);
+	silenceTimeout = setTimeout(function() {
+			console.log('silenceTimeout');
+			silenceCallback();
+		}, SILENCE_TIMEOUT);
 }
 
-function endAudioStream(callback) {
-	console.log('[end]');
+// Checks whether a transcript has an identifiable intent (above threshold)
+// If it does, trigger a callback
+function intentsFilter (intentCallback) {
+	return function (results) {
+		console.log(results.nlu.intent.name +': '+ results.nlu.intent.confidence);
 
-	// Transmit final decoding
-	let results = resetStream();
-	if (results) {
-		if (callback) {
-			add_nlu_intents(results).then(callback).catch((err) => {console.log(err);});
+		// If the transcript so far has a clear intent, transmit it
+		if (results.nlu.intent.confidence > INTENT_THRESHOLD) {
+			intentCallback(results);
+			console.log("Found intent: " + results.nlu.intent.name);
+			console.log("Utterance:", results.text)
 		}
-	}
-}
-
-function resetAudioStream(callback) {
-	console.log('[reset]');
-
-	// Transmit final decoding
-	let results = resetStream();
-	if (results) {
-		if (callback) {
-			add_nlu_intents(results).then(callback).catch((err) => {console.log(err);});
-		}
-	}
-}
-
-// Generate function that updates the transcript
-function processTranscriptCallback(transcript_callback, intent_callback, silence_callback) {
-	return function (){
-		let newTranscript = intermediateDecode();
-		//console.log(numberOfBuffers);
-		numberOfBuffers=0;
-		if (newTranscript != currentTranscript) {
-			//console.log("Transcript change:",newTranscript,currentTranscript);
-			//console.log("Same:",numberOfSame);
-			numberOfSame=0;
-			currentTranscript = newTranscript;
-			transcript_callback(currentTranscript);
-			intents_handler({text:currentTranscript},intent_callback);
-
-			// Set silence timeout in case transcript doesn't change
-			clearTimeout(silenceTimeout);
-			silenceTimeout = setTimeout(function() {
-				console.log('silenceTimeout');
-				resetAudioStream(silence_callback);
-			},silenceTimeoutTolerence);
-		} else {if (newTranscript != '') {numberOfSame++;} }
-	}
-}
-
-// Takes a transcript and a callback. If the transcript has an identifiable intent (above threshold), trigger callback
-async function intents_handler(results, intent_callback) {
-	// const results = await add_nlu_intents(transcript);
-	const nlu_body = { text: results.text };
-
-	const nlu_response = await fetch(NLU_SERVER+'/model/parse', {
-		method: 'post', body: JSON.stringify(nlu_body),
-		headers: {'Content-Type': 'application/json'}
-	});
-
-	results.nlu = await nlu_response.json();
-
-	//console.log(JSON.stringify(results));
-
-	console.log(results.nlu.intent.name +': '+ results.nlu.intent.confidence);
-
-	// If the transcript so far has a clear intent, transmit it
-	if (results.nlu.intent.confidence > INTENT_THRESHOLD) {
-		intent_callback(results);
-		console.log("Found intent: " + results.nlu.intent.name);
-		console.log("Utterance:", results.text)
-		//console.log("Current transcript:",currentTranscript);
-		resetStream();
-	}
+	};
 };
 
 // Get an intent evaluation from the NLU server
-async function add_nlu_intents(results) {
+async function addNLUIntents(results) {
 	const nlu_body = { text: results.text };
 
 	const nlu_response = await fetch(NLU_SERVER+'/model/parse', {
@@ -141,51 +65,17 @@ async function add_nlu_intents(results) {
 };
 
 /////
-//Functions to handle the model interface
+// Set up STT worker
 /////
 
-function createStream() {
-	modelStream = englishModel.createStream();
-	recordedAudioLength = 0;
-	currentTranscript='';
-}
+let modelWorker = new Worker(STT_WORKER);
 
-function finishStream() {
-	if (modelStream) {
-		let start = new Date();
-		let text = modelStream.finishStream();
-		if (text) {
-			//console.log('');
-			//console.log('Recognized Text:', text);
-			let recogTime = new Date().getTime() - start.getTime();
-			return {
-				text,
-				recogTime,
-				audioLength: Math.round(recordedAudioLength)
-			};
-		}
-	}
-	silenceBuffers = [];
-	modelStream = null;
-}
+modelWorker.on('error', (e) => console.log(e));
 
-function intermediateDecode() {
-	return modelStream.intermediateDecode();
-}
-
-// Stream should always stay created as long as client is connected. Use this to reset
-function resetStream() {
+resetWorker = function () {
+	modelWorker.postMessage({command:'reset'});
 	clearTimeout(endTimeout);
 	clearTimeout(silenceTimeout);
-	let results = finishStream();
-	createStream();
-	return results;
-}
-
-function feedAudioContent(chunk) {
-	recordedAudioLength += (chunk.length / 2) * (1 / 16000) * 1000;
-	modelStream.feedAudioContent(chunk);
-	numberOfBuffers++;
 }
 
 
@@ -205,42 +95,63 @@ io.set('origins', '*:*');
 io.on('connection', function(socket) {
 	console.log('client connected');
 
-	//intents_handler({text:"I'm great!"},(results) =>{});
-
-	createStream();
-
-	let transcript_checks = setInterval(processTranscriptCallback(
-			(transcript) => {socket.emit('transcription_step', transcript); }, // Transcript callback
-			(results) => {socket.emit('recognize_intent',results);}, // Intent callback
-			(results) => {socket.emit('final_intent',results);} // Silence callback
-		),TRANSCRIPT_INTERVAL);
-
-	socket.once('disconnect', () => {
-		console.log('client disconnected');
-		clearInterval(transcript_checks);
-		finishStream(); // Close the stream
+	modelWorker.removeAllListeners('message');
+	modelWorker.on('message', function (e) {
+		//console.log("Message:",e);
+		if (e) switch (e.type) {
+			case 'final':
+				addNLUIntents(e).then((res) => socket.emit('final_intent', res ) ).catch((err) => {console.log(err);} );
+				break;
+			case 'intermediate':
+				processTranscript (
+					e,
+					(transcript) => {socket.emit('transcription_step', transcript); }, // Transcript callback
+					(results) => {modelWorker.postMessage({command:'dump'}); socket.emit('recognize_intent',results);}, // Intent callback
+					resetWorker // Silence callback
+				);
+				break;
+		} else {console.log("Empty message");}
 	});
 
-	socket.on('stream-data', function(data) {
-		//console.log('tick');
-		processAudioStream(data);
+	// socketIO messages
+	socket.once('disconnect', () => {
+		console.log('client disconnected');
+		clearTimeout(endTimeout);
+		clearTimeout(silenceTimeout);
+		// Unbind the worker from the socket
+		modelWorker.removeAllListeners('message');
+		modelWorker.on('message', (e) => {console.log("Discarded message");});
+	});
+
+	socket.on('stream-data', function(chunk) {
+		//console.log('tick');	// Process a chunck of audio data
+		modelWorker.postMessage({command:'process', chunk} );
+
+		// timeout after 1s of inactivity
+		clearTimeout(endTimeout);
+		endTimeout = setTimeout(function() {
+			console.log('timeout');
+			resetWorker();
+		},INACTIVITY_TIMEOUT);
 	});
 
 	socket.on('stream-end', function() {
-		endAudioStream( (results) => {
-			socket.emit('final_intent', results);
-		});
+		console.log('[end]');
+		resetWorker();
 	});
 
 	socket.on('stream-reset', function() {
-		resetAudioStream( (results) => {
-			socket.emit('final_intent', results);
-		});
+		console.log('[reset]');
+		resetWorker();
 	});
 });
 
+// Start the server
 app.listen(SERVER_PORT, () => {
 	console.log('Socket server listening on:', SERVER_PORT);
 });
 
 module.exports = app;
+
+// I never get rid of the worker...
+// modelWorker.terminate(); // Kill the worker thread (should I be cleaning up the allocated model properly?)
