@@ -9,7 +9,7 @@ let DEEPSPEECH_MODEL = __dirname + '/models/deepspeech-0.8.2-models'; // path to
 
 let numberOfBuffers = 0;
 let chunkNumber = 0;
-const chunkBatch = 5; // Deepspeech actually only does intermediate decoding every so many chunks. So the transcript is garanteed not to change in between
+const chunkBatchSize = 5; // Deepspeech actually only does intermediate decoding every so many chunks. So the transcript is garanteed not to change in between
 // My understanding is that the model does the computation when you feed it data and intermediateDecode() just polls its current result
 
 let modelStream;
@@ -64,7 +64,7 @@ function resetStream() {
 function feedAudioContent(chunk) {
 	recordedAudioLength += (chunk.length / 2) * (1 / 16000) * 1000;
 	modelStream.feedAudioContent(chunk);
-  numberOfBuffers++;
+  //numberOfBuffers++;
 }
 
 
@@ -78,14 +78,16 @@ parentPort.on('message', function (e) {
       // console.log("Got chunk");
       feedAudioContent(e.chunk);
       // console.log("Processed chunk");
-      let newTranscript = intermediateDecode();
-      if (newTranscript != currentTranscript) {
-        console.log("Transcript change");
-        currentTranscript = newTranscript;
-        parentPort.postMessage({type: 'intermediate', text: currentTranscript});
-        console.log("Number of buffers:", numberOfBuffers);
-        numberOfBuffers = 0;
-      }
+			if ((chunkNumber++ % chunkBatchSize) == 0){
+      	let newTranscript = intermediateDecode();
+      	if (newTranscript != currentTranscript) {
+        	//console.log("Transcript change");
+        	currentTranscript = newTranscript;
+        	parentPort.postMessage({type: 'intermediate', text: currentTranscript});
+        	//console.log("Number of buffers:", numberOfBuffers);
+        	//numberOfBuffers = 0;
+      	}
+			}
     break;
     case "reset":
       parentPort.postMessage(resetStream());
