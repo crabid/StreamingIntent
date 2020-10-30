@@ -3,7 +3,7 @@
 // (text property is the transcription, type property is whether this is a final or intermediate transcription)
 
 const {parentPort} = require('worker_threads');
-const DeepSpeech = require('deepspeech');
+const DeepSpeech = require('deepspeech-gpu');
 
 let DEEPSPEECH_MODEL = __dirname + '/models/deepspeech-0.8.2-models'; // path to deepspeech english model directory
 
